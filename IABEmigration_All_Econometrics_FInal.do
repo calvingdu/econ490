@@ -1,15 +1,143 @@
 // Emigration Rate with Solow Model
 // Data: IAB Brain Drain Dataset + Penn World Tables 11.0 + World Bank dataset
 // IAB coverage: 1980, 1985, 1990, 1995, 2000, 2005, 2010
+//
+// CITATIONS:
+// IAB Brain Drain Dataset:
+//   Brücker H., Capuano, S. and Marfouk, A. (2013). Education, gender and
+//   international migration: insights from a panel-dataset 1980-2010, mimeo.
+//   URL: https://iab.de/en/daten/iab-brain-drain/
+//
+// Penn World Tables 11.0:
+//   Feenstra, R. C., Inklaar, R., & Timmer, M. P. (2015). The Next Generation
+//   of the Penn World Table. American Economic Review, 105(10), 3150-3182.
+//   URL: www.ggdc.net/pwt
+//
+// World Bank Country Classifications:
+//   World Bank (2025). World Bank Country and Lending Groups.
+//   URL: https://datahelpdesk.worldbank.org/knowledgebase/articles/906519-world-bank-country-and-lending-groups
 
-// 1. File setup 
-cd "C:\Users\ianpa\OneDrive\Desktop\ECON 490\Econometrics"
+// HYPOTHESIS: An increase in Emigration Rate will result in a statistically signifiant effect on Economic Growth in the Origin Country. 
+
+// Our results show conclusive statistically significant effects when we seperate by gender, but since these are opposing effects, the main effect is not statistically significant. 
+
+// 0. File setup 
+cd "/Users/calvindu/School/2025W2/ECON490/project/iab/gender_specific"
 capture mkdir "1.made_data"
 capture mkdir "2.output"
 
 capture log close
 log using "2.output/IABEmigrationAll.log", text replace
 
+// 1. PREPARE DATA
+// 1.1 IAB DATA
+// Reshape to wide: one row per country-year with 3 emig rate columns (total, male, female)
+// Emigration is defined as population emigrated / total population
+// so for example tot_ratemale = male emigrants / male population which is why they're unrelated
+
+use "0.source_data/iabbd_8010_v1_emigration.dta", clear
+keep ccode_origin year gender tot_rate
+rename ccode_origin countrycode
+
+gen gtype = ""
+replace gtype = "combined" if gender == "Male and Female"
+replace gtype = "male" if gender == "Male"
+replace gtype = "female" if gender == "Female"
+drop gender
+
+reshape wide tot_rate, i(countrycode year) j(gtype) string
+
+rename tot_ratecombined emig_combined
+rename tot_ratemale     emig_male
+rename tot_ratefemale   emig_female
+
+// Convert proportions to percentages
+replace emig_combined = emig_combined * 100
+replace emig_male     = emig_male * 100
+replace emig_female   = emig_female * 100
+
+label var emig_combined  "Emigration rate, combined (% of population)"
+label var emig_male 	 "Emigration rate, male (% of population)"
+label var emig_female	 "Emigration rate, female (% of population)"
+
+save "1.made_data/iab_clean_wide.dta", replace
+
+// 1.2. PWT Data
+use "0.source_data/pwt110.dta", clear
+
+global solow_variables "rgdpe pop csh_i hc"
+keep ${solow_variables} year countrycode
+
+// Assign PWT years to nearest IAB 5-year period
+generate period = .
+replace period = 1980 if year >= 1978 & year <= 1982
+replace period = 1985 if year >= 1983 & year <= 1987
+replace period = 1990 if year >= 1988 & year <= 1992
+replace period = 1995 if year >= 1993 & year <= 1997
+replace period = 2000 if year >= 1998 & year <= 2002
+replace period = 2005 if year >= 2003 & year <= 2007
+replace period = 2010 if year >= 2008 & year <= 2012
+drop if missing(period)
+
+// Collapse to 5-year period averages
+collapse (mean) csh_i rgdpe pop hc, by(countrycode period)
+rename period year
+save "1.made_data/solowsubset_5yr.dta", replace
+
+
+// 1.3. MERGE WORLD BANK CLASSIFICATIONS INTO PWT
+preserve
+    import excel "0.source_data/CLASS_2025_10_07.xlsx", ///
+        sheet("List of economies") firstrow clear
+    rename Economy     country_name
+    rename Code        countrycode
+    rename Region      region
+    rename Incomegroup income_group
+    drop if missing(countrycode) | countrycode == ""
+    keep countrycode region income_group
+    save "1.made_data/wb_class.dta", replace
+restore
+
+use "1.made_data/solowsubset_5yr.dta", clear
+merge m:1 countrycode using "1.made_data/wb_class.dta"
+keep if _merge == 3
+drop _merge
+label var region       "World Bank region"
+label var income_group "World Bank income group"
+save "1.made_data/solowsubset_5yr.dta", replace
+
+
+// 1.4. MERGE IAB WITH PWT
+// 1:1 merge: one row per country-year in both datasets
+use "1.made_data/iab_clean_wide.dta", clear
+merge 1:1 countrycode year using "1.made_data/solowsubset_5yr.dta"
+tab _merge
+keep if _merge == 3
+drop _merge
+
+describe
+summarize
+
+quietly encode countrycode, gen(ccode)
+tsset ccode year, delta(5)
+
+// Solow variables
+gen lngdp    = ln(rgdpe / pop)
+gen dlngdp   = ln(ln(rgdpe/pop) - ln(L1.rgdpe/L1.pop))
+gen lnschool = ln(hc)
+gen lnn      = ln(ln(pop) - ln(L1.pop))
+gen lnsave   = ln(csh_i)
+
+// Log emigration rates for each gender category
+gen lnemig_combined = ln(emig_combined)
+gen lnemig_male     = ln(emig_male)
+gen lnemig_female   = ln(emig_female)
+
+label var lnemig_combined "Emigration rate, combined (ln %)"
+label var lnemig_male "Emigration rate, male (ln %)"
+label var lnemig_female "Emigration rate, female (ln %)"
+
+save "1.made_data/final_iab_pwt_dataset.dta", replace
 
 // 2. Load Data 
 use "1.made_data/final_iab_pwt_dataset.dta", clear
@@ -22,6 +150,17 @@ drop if emig_combined ==.
 label var rgdpe "Expenditure-side real GDP at chained PPPs (in mil. 2021US$)"
 label var csh_i "Share of Gross Capital Formation at current PPPs (Savings)"
 label var hc "Human capital index"
+
+// Print Out a summary table
+keep if year == 2000 & !missing(emig_combined)
+
+label var pop           "Population"
+label var csh_i         "Investment share of GDP"
+label var hc            "Human capital index"
+label var emig_combined "Combined emigration rate (% of population)"
+
+tabstat rgdpe pop csh_i hc emig_combined emig_male emig_female, ///
+	statistics(mean sd min max n) columns(statistics) save
 
 *create and export a table of summary statistics
 sum2docx rgdpe csh_i hc pop emig_combined emig_male emig_female using "2.output/TableSummaryStats", ///
@@ -167,10 +306,16 @@ xtpcse dlngdp_w lnemig_combined_w L1.lngdp_w lnsave_w lnschool_w i.ccode i.year,
 estimates store step4
 estimates title: "4"
 
-etable, estimates(step1 step2 step3 step4) ///
+*Regression Step 5
+xtpcse dlngdp_w lnemig_combined_w L1.lngdp_w lnsave_w lnschool_w lnn_w i.ccode i.year, het
+estimates store step5
+estimates title: "5"
+
+etable, estimates(step1 step2 step3 step4 step5) ///
     mstat(N) mstat(r2)                                                          ///
     showstars showstarsnote varlabel                                             ///
-	keep(dlngdp_w L1.lngdp_w lnsave_w lnschool_w lnn_w lnemig_combined_w) ///
+	keep(dlngdp_w lnemig_combined_w L1.lngdp_w lnsave_w lnschool_w lnn_w) ///
+	title("Stepwise Regression Comparison") ///
     export("2.output/SteppedRegression.docx", replace)
 
 
@@ -319,7 +464,7 @@ graph export "2.output/GlobalHistogram.png", as(png) replace
 histogram lnemig_combined if income_group == "Upper middle income", color(yellow) lcolor(black) ///
 ytitle("Frequency") xtitle("Emigration Rate, Combined (ln%)") ///
 title("Emigration Frequency",position(11)) subtitle("Upper Middle Income", position(11)) ///
-note("Histogram displaying frequency distribution of the natural log of emigration rate for observations in the Upper Middle Income category")
+note("Histogram displaying frequency distribution of the natural log of emigration rate for the Upper Middle Income category")
 graph export "2.output/UpperMiddleIncomeHistogram.png", as(png) replace
 
 *combined emigration frequency by income level
