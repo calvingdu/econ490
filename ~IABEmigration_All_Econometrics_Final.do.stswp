@@ -224,6 +224,7 @@ display `"`income_groups'"'
 local i = 1
 foreach r of local income_groups {
     preserve
+	display "`r'"
     keep if income_group == "`r'"
     quietly xtpcse dlngdp L1.lngdp lnsave lnschool lnn lnemig_combined i.ccode i.year, het
     estimates store group_`i'
